@@ -5,12 +5,18 @@ import time
 import json
 import gspread
 from google.oauth2.service_account import Credentials
-import google.generativeai as genai
 from PIL import Image
+import google.generativeai as genai
 
 # ==========================================
-# 0. SPEICHER-LOGIK (GOOGLE SHEETS)
+# 0. SETUP: GOOGLE & KI
 # ==========================================
+# KI initialisieren (Fehler abfangen, falls Secret noch fehlt)
+try:
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+except Exception as e:
+    pass
+
 def get_gsheet_client():
     credentials_dict = dict(st.secrets["gcp_service_account"])
     scopes = [
@@ -42,7 +48,7 @@ def save_watchlist(watchlist):
         st.error(f"Fehler beim Speichern: {e}")
 
 # ==========================================
-# 1. BACKEND-LOGIK (BERECHNUNG & API)
+# 1. BACKEND: BERECHNUNG & API
 # ==========================================
 def calculate_nfe_dm(protein, fat, ash, fiber, moisture):
     try:
@@ -74,85 +80,105 @@ def fetch_from_api(barcode):
     except: return None
 
 # ==========================================
-# 2. BENUTZEROBERFLÄCHE (UI)
+# 2. KI: BILDANALYSE
+# ==========================================
+def analyze_image(img):
+    # Die App probiert automatisch das beste verfügbare Modell
+    models_to_try = ['gemini-1.5-flash', 'gemini-pro-vision']
+    last_error = None
+    
+    prompt = """
+    Lies das Etikett von diesem Katzenfutter. 
+    Suche nach den analytischen Bestandteilen (Rohprotein, Rohfett, Rohasche, Rohfaser, Feuchtigkeit).
+    Gib mir NUR ein JSON-Objekt zurück mit den exakten Prozentwerten als Zahlen (ohne %-Zeichen).
+    Beispiel:
+    {"protein": 11.0, "fat": 5.5, "ash": 2.0, "fiber": 0.4, "moisture": 80.0}
+    Wenn du einen Wert nicht findest, setze ihn auf 0.0. Keinen weiteren Text!
+    """
+    
+    for model_name in models_to_try:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content([prompt, img])
+            # Bereinige die Antwort (falls die KI Markdown drum herum packt)
+            result_text = response.text.replace("```json", "").replace("```", "").strip()
+            return json.loads(result_text)
+        except Exception as e:
+            last_error = e
+            continue # Falls 404 Fehler, probiere das nächste Modell!
+            
+    raise Exception(f"Beide Modelle sind fehlgeschlagen. Letzter Fehler: {last_error}")
+
+# ==========================================
+# 3. BENUTZEROBERFLÄCHE (UI)
 # ==========================================
 st.set_page_config(page_title="SugarCat Calc", page_icon="🐾", layout="centered")
-st.title("🐾 SugarCat Calc (AI Edition)")
-st.markdown("Der smarte **NFE-Rechner** mit KI-Erkennung für Diabetiker-Katzen.")
+st.title("🐾 SugarCat Calc")
+st.markdown("Der smarte **NFE-Rechner** für Diabetiker-Katzen.")
 
 if 'watchlist' not in st.session_state:
     st.session_state.watchlist = load_watchlist()
 
-# Initialisiere die manuellen Eingabewerte, damit die KI sie später überschreiben kann
-if 'man_protein' not in st.session_state: st.session_state['man_protein'] = 0.0
-if 'man_fat' not in st.session_state: st.session_state['man_fat'] = 0.0
-if 'man_ash' not in st.session_state: st.session_state['man_ash'] = 0.0
-if 'man_fiber' not in st.session_state: st.session_state['man_fiber'] = 0.0
-if 'man_moisture' not in st.session_state: st.session_state['man_moisture'] = 80.0
+# Platzhalter-Speicher für die KI-Werte (damit sich die Regler füllen)
+if 'ai_values' not in st.session_state:
+    st.session_state.ai_values = {"protein": 0.0, "fat": 0.0, "ash": 0.0, "fiber": 0.0, "moisture": 80.0}
 
 # --- BEREICH: NEUES FUTTER ---
-with st.expander("➕ Neues Futter scannen & hinzufügen", expanded=True):
+with st.expander("➕ Neues Futter hinzufügen & scannen", expanded=True):
+    
     st.markdown("**1. Allgemeine Infos**")
-    new_supermarket = st.selectbox("Supermarkt", ["DM", "Rossmann", "Lidl", "Aldi", "Fressnapf", "Kaufland", "Edeka", "Sonstige"])
     col1, col2 = st.columns(2)
     with col1:
+        new_supermarket = st.selectbox("Supermarkt", ["DM", "Rossmann", "Lidl", "Aldi", "Fressnapf", "Kaufland", "Edeka", "Sonstige"])
         new_brand = st.text_input("Marke (z.B. Winston)*")
     with col2:
         new_name = st.text_input("Sorte (z.B. Pâté Rind)*")
-    new_barcode = st.text_input("Barcode (Optional für Live-API)")
+        new_barcode = st.text_input("Barcode (für Auto-Suche)")
         
     st.markdown("---")
-    st.markdown("**2. 📸 Smarte KI-Erkennung (Etikett fotografieren)**")
+    st.markdown("**2. Kamera (KI-Etiketten-Scanner)**")
     
-    # Kamera-Input
-    picture = st.camera_input("Fotografiere die 'Analytischen Bestandteile' auf der Dose")
+    # Kamera MUSS außerhalb des Formulars sein, damit die Werte direkt aktualisiert werden
+    cam_image = st.camera_input("Fotografiere die 'Analytischen Bestandteile' auf der Dose")
     
-    if picture:
+    if cam_image is not None:
         if st.button("✨ Bild mit KI auslesen"):
-            with st.spinner("KI liest das Etikett... Bitte warten."):
+            with st.spinner("KI studiert das Etikett... Bitte warten..."):
                 try:
-                    # KI konfigurieren
-                    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-                    model = genai.GenerativeModel('gemini-pro-vision')
-                    img = Image.open(picture)
+                    img = Image.open(cam_image)
+                    ai_data = analyze_image(img)
                     
-                    # Anweisung an die KI
-                    prompt = 'Finde die "Analytischen Bestandteile" auf diesem Katzenfutter. Extrahiere die Prozentwerte für Rohprotein, Rohfett, Rohasche, Rohfaser und Feuchtigkeit. Antworte AUSSCHLIESSLICH im JSON Format ohne Markdown. Beispiel: {"protein": 10.5, "fat": 5.5, "ash": 2.0, "fiber": 0.5, "moisture": 80.0}. Wenn ein Wert fehlt, setze ihn auf 0.0 (außer Feuchtigkeit, dann setze 80.0).'
+                    # Werte überschreiben, damit die Schieberegler unten sie direkt anzeigen
+                    st.session_state.ai_values["protein"] = float(ai_data.get("protein", 0.0))
+                    st.session_state.ai_values["fat"] = float(ai_data.get("fat", 0.0))
+                    st.session_state.ai_values["ash"] = float(ai_data.get("ash", 0.0))
+                    st.session_state.ai_values["fiber"] = float(ai_data.get("fiber", 0.0))
+                    moist = float(ai_data.get("moisture", 0.0))
+                    st.session_state.ai_values["moisture"] = moist if moist > 0 else 80.0
                     
-                    response = model.generate_content([prompt, img])
-                    
-                    # Antwort bereinigen und lesen
-                    cleaned_text = response.text.replace('```json', '').replace('```', '').strip()
-                    data = json.loads(cleaned_text)
-                    
-                    # Regler automatisch verschieben
-                    st.session_state['man_protein'] = float(data.get('protein', 0.0))
-                    st.session_state['man_fat'] = float(data.get('fat', 0.0))
-                    st.session_state['man_ash'] = float(data.get('ash', 0.0))
-                    st.session_state['man_fiber'] = float(data.get('fiber', 0.0))
-                    st.session_state['man_moisture'] = float(data.get('moisture', 80.0))
-                    
-                    st.success("✅ Werte erfolgreich gelesen! Bitte überprüfe die Regler unten.")
+                    st.success("✅ Werte erfolgreich ausgelesen! Bitte unten in den Feldern kurz kontrollieren.")
                 except Exception as e:
-                    st.error(f"KI konnte das Bild nicht richtig lesen (Versuch es vielleicht mit besserem Licht). Fehler: {e}")
+                    st.error(f"KI konnte das Bild nicht richtig lesen: {e}")
 
     st.markdown("---")
-    st.markdown("**3. Werte (werden von KI ausgefüllt oder manuell)**")
     
-    with st.form("add_product_form", clear_on_submit=True):
+    # Formular für die Zahlenwerte und das Speichern
+    with st.form("add_product_form", clear_on_submit=False):
+        st.markdown("**3. Werte (werden von KI ausgefüllt oder von dir manuell)**")
+        
         col3, col4, col5 = st.columns(3)
         with col3:
-            man_protein = st.number_input("Rohprotein (%)", min_value=0.0, max_value=100.0, step=0.1, key="man_protein")
-            man_fat = st.number_input("Rohfett (%)", min_value=0.0, max_value=100.0, step=0.1, key="man_fat")
+            man_protein = st.number_input("Rohprotein (%)", min_value=0.0, max_value=100.0, value=st.session_state.ai_values["protein"], step=0.1)
+            man_fat = st.number_input("Rohfett (%)", min_value=0.0, max_value=100.0, value=st.session_state.ai_values["fat"], step=0.1)
         with col4:
-            man_ash = st.number_input("Rohasche (%)", min_value=0.0, max_value=100.0, step=0.1, key="man_ash")
-            man_fiber = st.number_input("Rohfaser (%)", min_value=0.0, max_value=100.0, step=0.1, key="man_fiber")
+            man_ash = st.number_input("Rohasche (%)", min_value=0.0, max_value=100.0, value=st.session_state.ai_values["ash"], step=0.1)
+            man_fiber = st.number_input("Rohfaser (%)", min_value=0.0, max_value=100.0, value=st.session_state.ai_values["fiber"], step=0.1)
         with col5:
-            man_moisture = st.number_input("Feuchtigkeit (%)", min_value=0.0, max_value=100.0, step=0.1, key="man_moisture")
+            man_moisture = st.number_input("Feuchtigkeit (%)", min_value=0.0, max_value=100.0, value=st.session_state.ai_values["moisture"], step=0.1)
             
         if st.form_submit_button("Speichern & Berechnen"):
             if new_brand and new_name:
-                with st.spinner("Wird gespeichert..."):
+                with st.spinner("Prüfe Daten..."):
                     api_data = fetch_from_api(new_barcode)
                     
                     if api_data:
@@ -164,7 +190,8 @@ with st.expander("➕ Neues Futter scannen & hinzufügen", expanded=True):
                         nfe_dm, is_safe = calculate_nfe_dm(man_protein, man_fat, man_ash, man_fiber, man_moisture)
                         nfe_val = nfe_dm
                         status_val = "✅ Top" if is_safe else "❌ Achtung"
-                        quelle_val = "📸 KI / Manuell"
+                        # Wenn die KI was erkannt hat, ist das die Quelle
+                        quelle_val = "📸 KI-Scan" if st.session_state.ai_values["protein"] > 0 else "✍️ Manuell"
                     else:
                         nfe_val = "N/A"
                         status_val = "⚠️ Keine Daten"
@@ -179,14 +206,10 @@ with st.expander("➕ Neues Futter scannen & hinzufügen", expanded=True):
                     st.session_state.watchlist.append(new_entry)
                     save_watchlist(st.session_state.watchlist)
                     
-                    # Werte nach Speichern wieder auf null setzen
-                    st.session_state['man_protein'] = 0.0
-                    st.session_state['man_fat'] = 0.0
-                    st.session_state['man_ash'] = 0.0
-                    st.session_state['man_fiber'] = 0.0
-                    st.session_state['man_moisture'] = 80.0
+                    # Regler nach dem Speichern für das nächste Futter wieder auf 0 setzen
+                    st.session_state.ai_values = {"protein": 0.0, "fat": 0.0, "ash": 0.0, "fiber": 0.0, "moisture": 80.0}
                     
-                    st.success("Erfolgreich gespeichert!")
+                    st.success("Erfolgreich in deiner Liste gespeichert!")
                     time.sleep(1)
                     st.rerun()
             else:
@@ -203,16 +226,19 @@ with st.expander("📝 Smarte Einkaufsliste", expanded=False):
                 selected_market = st.selectbox("In welchem Laden stehst du gerade?", available_markets)
                 if selected_market != "Alle Supermärkte":
                     safe_foods = safe_foods[safe_foods['Supermarkt'] == selected_market]
+                
                 if not safe_foods.empty:
-                    st.success(f"**Sichere Sorten für {selected_market}:**")
+                    st.success(f"**Deine sichere Einkaufsliste für {selected_market}:**")
                     for index, row in safe_foods.iterrows():
                         st.markdown(f"- 🛒 **{row['brand']}**: {row['name']} *(NFE: {row['NFE i.Tr. (%)']}%)*")
                 else:
-                    st.info(f"Für {selected_market} noch keine sicheren Sorten gefunden.")
+                    st.info(f"Für {selected_market} hast du leider noch keine sicheren Sorten gefunden.")
             else:
-                st.info("Noch keine sicheren Sorten (Unter 10%) gespeichert.")
+                st.info("Noch kein sicheres Futter (Unter 10%) gespeichert.")
+        else:
+            st.info("Bitte speichere zuerst Futter ab.")
     else:
-        st.write("Datenbank ist leer.")
+        st.write("Deine Datenbank ist noch leer.")
 
 # --- BEREICH: LÖSCHEN ---
 with st.expander("🗑️ Futter löschen"):
