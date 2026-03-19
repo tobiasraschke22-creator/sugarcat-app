@@ -11,7 +11,6 @@ import google.generativeai as genai
 # ==========================================
 # 0. SETUP: GOOGLE & KI
 # ==========================================
-# KI initialisieren (Fehler abfangen, falls Secret noch fehlt)
 try:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 except Exception as e:
@@ -80,19 +79,25 @@ def fetch_from_api(barcode):
     except: return None
 
 # ==========================================
-# 2. KI: BILDANALYSE (Der "Dietrich")
+# 2. KI: BILDANALYSE (Der "Auto-Scout")
 # ==========================================
 def analyze_image(img):
-    # Wir probieren einfach ALLE aktuellen Google-Modelle durch, bis eins funktioniert!
-    models_to_try = [
-        'gemini-1.5-flash', 
-        'gemini-1.5-flash-latest', 
-        'gemini-1.5-pro', 
-        'gemini-1.5-pro-latest',
-        'gemini-1.0-pro-vision-latest'
-    ]
+    valid_models = []
+    try:
+        # App fragt Google: "Welche Modelle darf dieser API-Schlüssel nutzen?"
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                # Wir filtern nach Modellen, die Bilder verstehen
+                if '1.5' in m.name or 'vision' in m.name:
+                    valid_models.append(m.name)
+    except Exception as e:
+        raise Exception(f"Konnte Google nicht nach Modellen fragen. Fehler: {e}")
+
+    # Wenn die Liste leer ist, blockiert Google diesen Account leider für Bilder
+    if not valid_models:
+        raise Exception("Dein Google-Account hat (vermutlich wegen der EU-Region) in der kostenlosen Version aktuell leider keinen Zugriff auf die Bilderkennung.")
+
     last_error = None
-    
     prompt = """
     Lies das Etikett von diesem Katzenfutter. 
     Suche nach den analytischen Bestandteilen (Rohprotein, Rohfett, Rohasche, Rohfaser, Feuchtigkeit).
@@ -102,18 +107,18 @@ def analyze_image(img):
     Wenn du einen Wert nicht findest, setze ihn auf 0.0. Keinen weiteren Text!
     """
     
-    for model_name in models_to_try:
+    # Probiere alle erlaubten Modelle aus
+    for model_name in valid_models:
         try:
             model = genai.GenerativeModel(model_name)
             response = model.generate_content([prompt, img])
-            # Bereinige die Antwort (falls die KI Markdown drum herum packt)
             result_text = response.text.replace("```json", "").replace("```", "").strip()
             return json.loads(result_text)
         except Exception as e:
             last_error = e
-            continue # Tür verschlossen? Nächstes Modell probieren!
+            continue
             
-    raise Exception(f"Alle KI-Türen sind zu. Letzter Fehler: {last_error}")
+    raise Exception(f"Die erlaubten Modelle {valid_models} haben abgelehnt. Letzter Fehler: {last_error}")
 
 # ==========================================
 # 3. BENUTZEROBERFLÄCHE (UI)
@@ -125,13 +130,10 @@ st.markdown("Der smarte **NFE-Rechner** für Diabetiker-Katzen.")
 if 'watchlist' not in st.session_state:
     st.session_state.watchlist = load_watchlist()
 
-# Platzhalter-Speicher für die KI-Werte (damit sich die Regler füllen)
 if 'ai_values' not in st.session_state:
     st.session_state.ai_values = {"protein": 0.0, "fat": 0.0, "ash": 0.0, "fiber": 0.0, "moisture": 80.0}
 
-# --- BEREICH: NEUES FUTTER ---
 with st.expander("➕ Neues Futter hinzufügen & scannen", expanded=True):
-    
     st.markdown("**1. Allgemeine Infos**")
     col1, col2 = st.columns(2)
     with col1:
@@ -144,17 +146,15 @@ with st.expander("➕ Neues Futter hinzufügen & scannen", expanded=True):
     st.markdown("---")
     st.markdown("**2. Kamera (KI-Etiketten-Scanner)**")
     
-    # Kamera MUSS außerhalb des Formulars sein, damit die Werte direkt aktualisiert werden
     cam_image = st.camera_input("Fotografiere die 'Analytischen Bestandteile' auf der Dose")
     
     if cam_image is not None:
         if st.button("✨ Bild mit KI auslesen"):
-            with st.spinner("KI studiert das Etikett... Bitte warten..."):
+            with st.spinner("Frage Google-Server an... Bitte warten..."):
                 try:
                     img = Image.open(cam_image)
                     ai_data = analyze_image(img)
                     
-                    # Werte überschreiben, damit die Schieberegler unten sie direkt anzeigen
                     st.session_state.ai_values["protein"] = float(ai_data.get("protein", 0.0))
                     st.session_state.ai_values["fat"] = float(ai_data.get("fat", 0.0))
                     st.session_state.ai_values["ash"] = float(ai_data.get("ash", 0.0))
@@ -162,16 +162,14 @@ with st.expander("➕ Neues Futter hinzufügen & scannen", expanded=True):
                     moist = float(ai_data.get("moisture", 0.0))
                     st.session_state.ai_values["moisture"] = moist if moist > 0 else 80.0
                     
-                    st.success("✅ Werte erfolgreich ausgelesen! Bitte unten in den Feldern kurz kontrollieren.")
+                    st.success("✅ Erfolgreich! Die Regler unten wurden für dich ausgefüllt.")
                 except Exception as e:
-                    st.error(f"KI konnte das Bild nicht richtig lesen: {e}")
+                    st.error(f"KI Fehler: {e}")
 
     st.markdown("---")
     
-    # Formular für die Zahlenwerte und das Speichern
     with st.form("add_product_form", clear_on_submit=False):
         st.markdown("**3. Werte (werden von KI ausgefüllt oder von dir manuell)**")
-        
         col3, col4, col5 = st.columns(3)
         with col3:
             man_protein = st.number_input("Rohprotein (%)", min_value=0.0, max_value=100.0, value=st.session_state.ai_values["protein"], step=0.1)
@@ -186,7 +184,6 @@ with st.expander("➕ Neues Futter hinzufügen & scannen", expanded=True):
             if new_brand and new_name:
                 with st.spinner("Prüfe Daten..."):
                     api_data = fetch_from_api(new_barcode)
-                    
                     if api_data:
                         nfe_dm, is_safe = calculate_nfe_dm(api_data['protein'], api_data['fat'], api_data['ash'], api_data['fiber'], api_data['moisture'])
                         nfe_val = nfe_dm
@@ -196,7 +193,6 @@ with st.expander("➕ Neues Futter hinzufügen & scannen", expanded=True):
                         nfe_dm, is_safe = calculate_nfe_dm(man_protein, man_fat, man_ash, man_fiber, man_moisture)
                         nfe_val = nfe_dm
                         status_val = "✅ Top" if is_safe else "❌ Achtung"
-                        # Wenn die KI was erkannt hat, ist das die Quelle
                         quelle_val = "📸 KI-Scan" if st.session_state.ai_values["protein"] > 0 else "✍️ Manuell"
                     else:
                         nfe_val = "N/A"
@@ -211,17 +207,13 @@ with st.expander("➕ Neues Futter hinzufügen & scannen", expanded=True):
                     
                     st.session_state.watchlist.append(new_entry)
                     save_watchlist(st.session_state.watchlist)
-                    
-                    # Regler nach dem Speichern für das nächste Futter wieder auf 0 setzen
                     st.session_state.ai_values = {"protein": 0.0, "fat": 0.0, "ash": 0.0, "fiber": 0.0, "moisture": 80.0}
-                    
-                    st.success("Erfolgreich in deiner Liste gespeichert!")
+                    st.success("Erfolgreich gespeichert!")
                     time.sleep(1)
                     st.rerun()
             else:
                 st.warning("Bitte mindestens Marke und Sorte (oben mit *) ausfüllen.")
 
-# --- BEREICH: SMARTE EINKAUFSLISTE ---
 with st.expander("📝 Smarte Einkaufsliste", expanded=False):
     if st.session_state.watchlist:
         df_shopping = pd.DataFrame(st.session_state.watchlist)
@@ -246,7 +238,6 @@ with st.expander("📝 Smarte Einkaufsliste", expanded=False):
     else:
         st.write("Deine Datenbank ist noch leer.")
 
-# --- BEREICH: LÖSCHEN ---
 with st.expander("🗑️ Futter löschen"):
     if st.session_state.watchlist:
         options = [f"{i['brand']} - {i['name']}" for i in st.session_state.watchlist]
@@ -258,7 +249,6 @@ with st.expander("🗑️ Futter löschen"):
             st.success(f"{deleted['brand']} gelöscht!")
             st.rerun()
 
-# --- BEREICH: GESAMTE TABELLE ---
 st.subheader("🛒 Deine komplette Datenbank")
 
 if st.session_state.watchlist:
