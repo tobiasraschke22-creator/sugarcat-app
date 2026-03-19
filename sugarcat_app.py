@@ -84,18 +84,15 @@ def fetch_from_api(barcode):
 def analyze_image(img):
     valid_models = []
     try:
-        # App fragt Google: "Welche Modelle darf dieser API-Schlüssel nutzen?"
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods:
-                # Wir filtern nach Modellen, die Bilder verstehen
                 if '1.5' in m.name or 'vision' in m.name:
                     valid_models.append(m.name)
     except Exception as e:
         raise Exception(f"Konnte Google nicht nach Modellen fragen. Fehler: {e}")
 
-    # Wenn die Liste leer ist, blockiert Google diesen Account leider für Bilder
     if not valid_models:
-        raise Exception("Dein Google-Account hat (vermutlich wegen der EU-Region) in der kostenlosen Version aktuell leider keinen Zugriff auf die Bilderkennung.")
+        raise Exception("Dein Google-Account hat leider keinen Zugriff auf die Bilderkennung.")
 
     last_error = None
     prompt = """
@@ -107,7 +104,6 @@ def analyze_image(img):
     Wenn du einen Wert nicht findest, setze ihn auf 0.0. Keinen weiteren Text!
     """
     
-    # Probiere alle erlaubten Modelle aus
     for model_name in valid_models:
         try:
             model = genai.GenerativeModel(model_name)
@@ -118,39 +114,67 @@ def analyze_image(img):
             last_error = e
             continue
             
-    raise Exception(f"Die erlaubten Modelle {valid_models} haben abgelehnt. Letzter Fehler: {last_error}")
+    raise Exception(f"Die erlaubten Modelle haben abgelehnt. Letzter Fehler: {last_error}")
 
 # ==========================================
-# 3. BENUTZEROBERFLÄCHE (UI)
+# 3. BENUTZEROBERFLÄCHE (UI - APP DESIGN)
 # ==========================================
 st.set_page_config(page_title="SugarCat Calc", page_icon="🐾", layout="centered")
-st.title("🐾 SugarCat Calc")
-st.markdown("Der smarte **NFE-Rechner** für Diabetiker-Katzen.")
 
+# Schlichter Header
+st.markdown("<h2 style='text-align: center;'>🐾 SugarCat</h2>", unsafe_allow_html=True)
+
+# Lade Daten in den Session State
 if 'watchlist' not in st.session_state:
     st.session_state.watchlist = load_watchlist()
 
 if 'ai_values' not in st.session_state:
     st.session_state.ai_values = {"protein": 0.0, "fat": 0.0, "ash": 0.0, "fiber": 0.0, "moisture": 80.0}
 
-with st.expander("➕ Neues Futter hinzufügen & scannen", expanded=True):
-    st.markdown("**1. Allgemeine Infos**")
+# --- DIE NEUE APP-NAVIGATION (TABS) ---
+tab_db, tab_scan, tab_shop, tab_settings = st.tabs(["📊 Liste", "📸 Scannen", "🛒 Einkauf", "⚙️ Setup"])
+
+# --- TAB 1: DATENBANK ---
+with tab_db:
+    st.subheader("Alle Futtersorten")
+    if st.session_state.watchlist:
+        df = pd.DataFrame(st.session_state.watchlist)
+        if 'NFE i.Tr. (%)' not in df.columns:
+            df['NFE i.Tr. (%)'] = "N/A"
+            df['Status'] = "⚠️ Alt"
+            df['Quelle'] = "-"
+
+        df_display = df[['Supermarkt', 'brand', 'name', 'NFE i.Tr. (%)', 'Status']]
+        df_display.columns = ['Markt', 'Marke', 'Sorte', 'NFE (%)', 'Bewertung']
+        
+        def color_status(val):
+            if 'Top' in str(val): return 'background-color: #a8e6cf'
+            elif 'Achtung' in str(val): return 'background-color: #ff8b94'
+            elif 'Keine Daten' in str(val): return 'background-color: #ffe082'
+            return ''
+            
+        st.dataframe(df_display.style.map(color_status, subset=['Bewertung']), use_container_width=True, hide_index=True)
+    else:
+        st.info("Noch kein Futter gespeichert.")
+
+# --- TAB 2: SCANNEN & HINZUFÜGEN ---
+with tab_scan:
+    st.subheader("Neues Futter prüfen")
+    
     col1, col2 = st.columns(2)
     with col1:
-        new_supermarket = st.selectbox("Supermarkt", ["DM", "Rossmann", "Lidl", "Aldi", "Fressnapf", "Kaufland", "Edeka", "Sonstige"])
-        new_brand = st.text_input("Marke (z.B. Winston)*")
+        new_supermarket = st.selectbox("Laden", ["DM", "Rossmann", "Lidl", "Aldi", "Fressnapf", "Kaufland", "Edeka", "Sonstige"])
+        new_brand = st.text_input("Marke*")
     with col2:
-        new_name = st.text_input("Sorte (z.B. Pâté Rind)*")
-        new_barcode = st.text_input("Barcode (für Auto-Suche)")
+        new_name = st.text_input("Sorte*")
+        new_barcode = st.text_input("Barcode (optional)")
         
     st.markdown("---")
-    st.markdown("**2. Kamera (KI-Etiketten-Scanner)**")
     
-    cam_image = st.camera_input("Fotografiere die 'Analytischen Bestandteile' auf der Dose")
-    
+    cam_image = st.camera_input("Rückseite fotografieren")
     if cam_image is not None:
-        if st.button("✨ Bild mit KI auslesen"):
-            with st.spinner("Frage Google-Server an... Bitte warten..."):
+        if st.button("✨ Bild mit KI auslesen", use_container_width=True):
+            with st.spinner("Lese Etikett..."):
                 try:
                     img = Image.open(cam_image)
                     ai_data = analyze_image(img)
@@ -162,27 +186,24 @@ with st.expander("➕ Neues Futter hinzufügen & scannen", expanded=True):
                     moist = float(ai_data.get("moisture", 0.0))
                     st.session_state.ai_values["moisture"] = moist if moist > 0 else 80.0
                     
-                    st.success("✅ Erfolgreich! Die Regler unten wurden für dich ausgefüllt.")
+                    st.success("✅ Erkannt!")
                 except Exception as e:
-                    st.error(f"KI Fehler: {e}")
+                    st.error(f"Fehler: {e}")
 
-    st.markdown("---")
-    
     with st.form("add_product_form", clear_on_submit=False):
-        st.markdown("**3. Werte (werden von KI ausgefüllt oder von dir manuell)**")
         col3, col4, col5 = st.columns(3)
         with col3:
-            man_protein = st.number_input("Rohprotein (%)", min_value=0.0, max_value=100.0, value=st.session_state.ai_values["protein"], step=0.1)
-            man_fat = st.number_input("Rohfett (%)", min_value=0.0, max_value=100.0, value=st.session_state.ai_values["fat"], step=0.1)
+            man_protein = st.number_input("Protein", min_value=0.0, max_value=100.0, value=st.session_state.ai_values["protein"], step=0.1)
+            man_fat = st.number_input("Fett", min_value=0.0, max_value=100.0, value=st.session_state.ai_values["fat"], step=0.1)
         with col4:
-            man_ash = st.number_input("Rohasche (%)", min_value=0.0, max_value=100.0, value=st.session_state.ai_values["ash"], step=0.1)
-            man_fiber = st.number_input("Rohfaser (%)", min_value=0.0, max_value=100.0, value=st.session_state.ai_values["fiber"], step=0.1)
+            man_ash = st.number_input("Asche", min_value=0.0, max_value=100.0, value=st.session_state.ai_values["ash"], step=0.1)
+            man_fiber = st.number_input("Faser", min_value=0.0, max_value=100.0, value=st.session_state.ai_values["fiber"], step=0.1)
         with col5:
-            man_moisture = st.number_input("Feuchtigkeit (%)", min_value=0.0, max_value=100.0, value=st.session_state.ai_values["moisture"], step=0.1)
+            man_moisture = st.number_input("Feuchte", min_value=0.0, max_value=100.0, value=st.session_state.ai_values["moisture"], step=0.1)
             
-        if st.form_submit_button("Speichern & Berechnen"):
+        if st.form_submit_button("💾 Speichern & Berechnen", use_container_width=True):
             if new_brand and new_name:
-                with st.spinner("Prüfe Daten..."):
+                with st.spinner("Speichere..."):
                     api_data = fetch_from_api(new_barcode)
                     if api_data:
                         nfe_dm, is_safe = calculate_nfe_dm(api_data['protein'], api_data['fat'], api_data['ash'], api_data['fiber'], api_data['moisture'])
@@ -208,65 +229,51 @@ with st.expander("➕ Neues Futter hinzufügen & scannen", expanded=True):
                     st.session_state.watchlist.append(new_entry)
                     save_watchlist(st.session_state.watchlist)
                     st.session_state.ai_values = {"protein": 0.0, "fat": 0.0, "ash": 0.0, "fiber": 0.0, "moisture": 80.0}
-                    st.success("Erfolgreich gespeichert!")
+                    st.success("Gespeichert!")
                     time.sleep(1)
                     st.rerun()
             else:
-                st.warning("Bitte mindestens Marke und Sorte (oben mit *) ausfüllen.")
+                st.warning("Bitte Marke und Sorte ausfüllen.")
 
-with st.expander("📝 Smarte Einkaufsliste", expanded=False):
+# --- TAB 3: EINKAUFSLISTE ---
+with tab_shop:
+    st.subheader("Im Supermarkt")
     if st.session_state.watchlist:
         df_shopping = pd.DataFrame(st.session_state.watchlist)
         if 'Status' in df_shopping.columns:
             safe_foods = df_shopping[df_shopping['Status'].str.contains("✅ Top", na=False, case=False)]
             if not safe_foods.empty:
                 available_markets = ["Alle Supermärkte"] + sorted(safe_foods['Supermarkt'].unique().tolist())
-                selected_market = st.selectbox("In welchem Laden stehst du gerade?", available_markets)
+                selected_market = st.selectbox("Wo bist du?", available_markets)
                 if selected_market != "Alle Supermärkte":
                     safe_foods = safe_foods[safe_foods['Supermarkt'] == selected_market]
                 
                 if not safe_foods.empty:
-                    st.success(f"**Deine sichere Einkaufsliste für {selected_market}:**")
+                    st.write(f"Sicheres Futter bei **{selected_market}**:")
                     for index, row in safe_foods.iterrows():
-                        st.markdown(f"- 🛒 **{row['brand']}**: {row['name']} *(NFE: {row['NFE i.Tr. (%)']}%)*")
+                        st.markdown(f"- ✅ **{row['brand']}**: {row['name']} *(NFE: {row['NFE i.Tr. (%)']}%)*")
                 else:
-                    st.info(f"Für {selected_market} hast du leider noch keine sicheren Sorten gefunden.")
+                    st.info(f"Nichts Sicheres für {selected_market} gefunden.")
             else:
-                st.info("Noch kein sicheres Futter (Unter 10%) gespeichert.")
+                st.info("Kein sicheres Futter gespeichert.")
         else:
             st.info("Bitte speichere zuerst Futter ab.")
     else:
         st.write("Deine Datenbank ist noch leer.")
 
-with st.expander("🗑️ Futter löschen"):
+# --- TAB 4: EINSTELLUNGEN ---
+with tab_settings:
+    st.subheader("Verwalten")
+    st.write("Hier kannst du alte Einträge entfernen.")
     if st.session_state.watchlist:
         options = [f"{i['brand']} - {i['name']}" for i in st.session_state.watchlist]
-        selected = st.selectbox("Welches Futter entfernen?", options)
-        if st.button("Löschen"):
+        selected = st.selectbox("Futter auswählen", options)
+        if st.button("🗑️ Löschen"):
             idx = options.index(selected)
             deleted = st.session_state.watchlist.pop(idx)
             save_watchlist(st.session_state.watchlist)
-            st.success(f"{deleted['brand']} gelöscht!")
+            st.success(f"Gelöscht!")
+            time.sleep(1)
             st.rerun()
-
-st.subheader("🛒 Deine komplette Datenbank")
-
-if st.session_state.watchlist:
-    df = pd.DataFrame(st.session_state.watchlist)
-    if 'NFE i.Tr. (%)' not in df.columns:
-        df['NFE i.Tr. (%)'] = "N/A"
-        df['Status'] = "⚠️ Alt"
-        df['Quelle'] = "-"
-
-    df_display = df[['Supermarkt', 'brand', 'name', 'NFE i.Tr. (%)', 'Status', 'Quelle']]
-    df_display.columns = ['Markt', 'Marke', 'Sorte', 'NFE (%)', 'Bewertung', 'Quelle']
-    
-    def color_status(val):
-        if 'Top' in str(val): return 'background-color: #a8e6cf'
-        elif 'Achtung' in str(val): return 'background-color: #ff8b94'
-        elif 'Keine Daten' in str(val): return 'background-color: #ffe082'
-        return ''
-        
-    st.dataframe(df_display.style.map(color_status, subset=['Bewertung']), use_container_width=True, hide_index=True)
-else:
-    st.info("Noch kein Futter gespeichert.")
+    else:
+        st.info("Datenbank ist leer.")
