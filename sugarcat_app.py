@@ -80,12 +80,13 @@ st.markdown("Der smarte **NFE-Rechner** für Diabetiker-Katzen.")
 if 'watchlist' not in st.session_state:
     st.session_state.watchlist = load_watchlist()
 
-with st.expander("➕ Neues Futter hinzufügen & scannen", expanded=True):
+# --- BEREICH: NEUES FUTTER ---
+with st.expander("➕ Neues Futter hinzufügen & scannen", expanded=False):
     with st.form("add_product_form", clear_on_submit=True):
         st.markdown("**1. Allgemeine Infos**")
         col1, col2 = st.columns(2)
         with col1:
-            new_supermarket = st.selectbox("Supermarkt", ["DM", "Rossmann", "Lidl", "Aldi", "Fressnapf", "Sonstige"])
+            new_supermarket = st.selectbox("Supermarkt", ["DM", "Rossmann", "Lidl", "Aldi", "Fressnapf", "Kaufland", "Edeka", "Sonstige"])
             new_brand = st.text_input("Marke (z.B. Winston)*")
         with col2:
             new_name = st.text_input("Sorte (z.B. Pâté Rind)*")
@@ -93,7 +94,6 @@ with st.expander("➕ Neues Futter hinzufügen & scannen", expanded=True):
             
         st.markdown("---")
         st.markdown("**2. Manuelle Eingabe (Optional, falls Barcode unbekannt)**")
-        st.caption("Tippe hier die %-Werte von der Dose ab, wenn die API das Futter nicht kennt.")
         
         col3, col4, col5 = st.columns(3)
         with col3:
@@ -108,29 +108,23 @@ with st.expander("➕ Neues Futter hinzufügen & scannen", expanded=True):
         if st.form_submit_button("Speichern & Berechnen"):
             if new_brand and new_name:
                 with st.spinner("Prüfe Daten..."):
-                    # 1. Versuche API (falls Barcode vorhanden)
                     api_data = fetch_from_api(new_barcode)
                     
-                    # 2. Entscheide, womit gerechnet wird
                     if api_data:
-                        # Priorität 1: API hat was gefunden!
                         nfe_dm, is_safe = calculate_nfe_dm(api_data['protein'], api_data['fat'], api_data['ash'], api_data['fiber'], api_data['moisture'])
                         nfe_val = nfe_dm
                         status_val = "✅ Top" if is_safe else "❌ Achtung"
                         quelle_val = api_data['source']
                     elif man_protein > 0 and man_fat > 0:
-                        # Priorität 2: API hat nichts, aber User hat manuell was eingetippt!
                         nfe_dm, is_safe = calculate_nfe_dm(man_protein, man_fat, man_ash, man_fiber, man_moisture)
                         nfe_val = nfe_dm
                         status_val = "✅ Top" if is_safe else "❌ Achtung"
                         quelle_val = "✍️ Manuell"
                     else:
-                        # Priorität 3: Weder API noch manuelle Daten
                         nfe_val = "N/A"
                         status_val = "⚠️ Keine Daten"
                         quelle_val = "Fehlen"
                     
-                    # 3. Speichern
                     new_entry = {
                         "Supermarkt": new_supermarket, "brand": new_brand, "name": new_name,
                         "store_type": new_supermarket.lower(), "barcode": new_barcode,
@@ -139,12 +133,45 @@ with st.expander("➕ Neues Futter hinzufügen & scannen", expanded=True):
                     
                     st.session_state.watchlist.append(new_entry)
                     save_watchlist(st.session_state.watchlist)
-                    st.success("Erfolgreich in der Datenbank gespeichert!")
-                    time.sleep(1) # Kurze Pause, damit der User die grüne Box sieht
+                    st.success("Erfolgreich gespeichert!")
+                    time.sleep(1)
                     st.rerun()
             else:
-                st.warning("Bitte mindestens Marke und Sorte (oben mit *) ausfüllen.")
+                st.warning("Bitte mindestens Marke und Sorte ausfüllen.")
 
+# --- NEU: SMARTE EINKAUFSLISTE ---
+with st.expander("📝 Smarte Einkaufsliste", expanded=True):
+    if st.session_state.watchlist:
+        df_shopping = pd.DataFrame(st.session_state.watchlist)
+        
+        # Filtere nur Sorten heraus, die den Status "✅ Top" haben
+        if 'Status' in df_shopping.columns:
+            safe_foods = df_shopping[df_shopping['Status'].str.contains("✅ Top", na=False, case=False)]
+            
+            if not safe_foods.empty:
+                # Erstelle eine Liste aller Supermärkte, für die wir sicheres Futter haben
+                available_markets = ["Alle Supermärkte"] + sorted(safe_foods['Supermarkt'].unique().tolist())
+                selected_market = st.selectbox("In welchem Laden stehst du gerade?", available_markets)
+                
+                if selected_market != "Alle Supermärkte":
+                    # Zeige nur Futter für den ausgewählten Markt
+                    safe_foods = safe_foods[safe_foods['Supermarkt'] == selected_market]
+                
+                if not safe_foods.empty:
+                    st.success(f"**Deine sichere Einkaufsliste für {selected_market}:**")
+                    # Gebe die Liste schön formatiert aus
+                    for index, row in safe_foods.iterrows():
+                        st.markdown(f"- 🛒 **{row['brand']}**: {row['name']} *(NFE: {row['NFE i.Tr. (%)']}%)*")
+                else:
+                    st.info(f"Für {selected_market} hast du leider noch keine sicheren Sorten gefunden.")
+            else:
+                st.info("Du hast noch keine Futtersorten mit einem sicheren NFE-Wert (Unter 10%) gespeichert.")
+        else:
+            st.info("Bitte speichere zuerst Futter ab, um eine Einkaufsliste zu generieren.")
+    else:
+        st.write("Deine Datenbank ist noch leer. Füge zuerst Futter hinzu!")
+
+# --- BEREICH: LÖSCHEN ---
 with st.expander("🗑️ Futter löschen"):
     if st.session_state.watchlist:
         options = [f"{i['brand']} - {i['name']}" for i in st.session_state.watchlist]
@@ -156,7 +183,8 @@ with st.expander("🗑️ Futter löschen"):
             st.success(f"{deleted['brand']} gelöscht!")
             st.rerun()
 
-st.subheader("🛒 Dein Supermarkt-Register")
+# --- BEREICH: GESAMTE TABELLE ---
+st.subheader("🛒 Deine komplette Datenbank")
 
 if st.session_state.watchlist:
     df = pd.DataFrame(st.session_state.watchlist)
