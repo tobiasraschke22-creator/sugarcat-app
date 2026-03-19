@@ -113,7 +113,7 @@ with st.expander("➕ Neues Futter scannen & hinzufügen", expanded=True):
                 try:
                     # KI konfigurieren
                     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-                    model = genai.GenerativeModel('gemini-1.5-flash')
+                    model = genai.GenerativeModel('gemini-pro-vision')
                     img = Image.open(picture)
                     
                     # Anweisung an die KI
