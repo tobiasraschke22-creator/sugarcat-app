@@ -76,38 +76,60 @@ st.set_page_config(page_title="SugarCat Calc", page_icon="🐾", layout="centere
 st.title("🐾 SugarCat Calc")
 st.markdown("Der smarte **NFE-Rechner** für Diabetiker-Katzen.")
 
-# Lade Daten beim Start
 if 'watchlist' not in st.session_state:
     st.session_state.watchlist = load_watchlist()
 
 with st.expander("➕ Neues Futter hinzufügen & scannen", expanded=True):
     with st.form("add_product_form", clear_on_submit=True):
+        st.markdown("**1. Allgemeine Infos**")
         col1, col2 = st.columns(2)
         with col1:
             new_supermarket = st.selectbox("Supermarkt", ["DM", "Rossmann", "Lidl", "Aldi", "Fressnapf", "Sonstige"])
-            new_brand = st.text_input("Marke (z.B. Winston)")
+            new_brand = st.text_input("Marke (z.B. Winston)*")
         with col2:
-            new_name = st.text_input("Sorte (z.B. Pâté Rind)")
-            new_barcode = st.text_input("Barcode (Pflicht für API!)")
+            new_name = st.text_input("Sorte (z.B. Pâté Rind)*")
+            new_barcode = st.text_input("Barcode (für Auto-Suche)")
+            
+        st.markdown("---")
+        st.markdown("**2. Manuelle Eingabe (Optional, falls Barcode unbekannt)**")
+        st.caption("Tippe hier die %-Werte von der Dose ab, wenn die API das Futter nicht kennt.")
+        
+        col3, col4, col5 = st.columns(3)
+        with col3:
+            man_protein = st.number_input("Rohprotein (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.1)
+            man_fat = st.number_input("Rohfett (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.1)
+        with col4:
+            man_ash = st.number_input("Rohasche (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.1)
+            man_fiber = st.number_input("Rohfaser (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.1)
+        with col5:
+            man_moisture = st.number_input("Feuchtigkeit (%)", min_value=0.0, max_value=100.0, value=80.0, step=0.1)
             
         if st.form_submit_button("Speichern & Berechnen"):
             if new_brand and new_name:
-                with st.spinner("Suche in der Live-Datenbank..."):
-                    # 1. API direkt abfragen
+                with st.spinner("Prüfe Daten..."):
+                    # 1. Versuche API (falls Barcode vorhanden)
                     api_data = fetch_from_api(new_barcode)
                     
-                    # 2. Werte berechnen
+                    # 2. Entscheide, womit gerechnet wird
                     if api_data:
+                        # Priorität 1: API hat was gefunden!
                         nfe_dm, is_safe = calculate_nfe_dm(api_data['protein'], api_data['fat'], api_data['ash'], api_data['fiber'], api_data['moisture'])
                         nfe_val = nfe_dm
                         status_val = "✅ Top" if is_safe else "❌ Achtung"
                         quelle_val = api_data['source']
+                    elif man_protein > 0 and man_fat > 0:
+                        # Priorität 2: API hat nichts, aber User hat manuell was eingetippt!
+                        nfe_dm, is_safe = calculate_nfe_dm(man_protein, man_fat, man_ash, man_fiber, man_moisture)
+                        nfe_val = nfe_dm
+                        status_val = "✅ Top" if is_safe else "❌ Achtung"
+                        quelle_val = "✍️ Manuell"
                     else:
+                        # Priorität 3: Weder API noch manuelle Daten
                         nfe_val = "N/A"
                         status_val = "⚠️ Keine Daten"
-                        quelle_val = "Nicht gefunden"
+                        quelle_val = "Fehlen"
                     
-                    # 3. Direkt mit den fertigen Werten abspeichern
+                    # 3. Speichern
                     new_entry = {
                         "Supermarkt": new_supermarket, "brand": new_brand, "name": new_name,
                         "store_type": new_supermarket.lower(), "barcode": new_barcode,
@@ -116,10 +138,11 @@ with st.expander("➕ Neues Futter hinzufügen & scannen", expanded=True):
                     
                     st.session_state.watchlist.append(new_entry)
                     save_watchlist(st.session_state.watchlist)
-                    st.success("Erfolgreich gespeichert!")
-                    st.rerun() # Lädt die Seite neu, damit die Tabelle sofort updatet
+                    st.success("Erfolgreich in der Datenbank gespeichert!")
+                    time.sleep(1) # Kurze Pause, damit der User die grüne Box sieht
+                    st.rerun()
             else:
-                st.warning("Bitte mindestens Marke und Sorte ausfüllen.")
+                st.warning("Bitte mindestens Marke und Sorte (oben mit *) ausfüllen.")
 
 with st.expander("🗑️ Futter löschen"):
     if st.session_state.watchlist:
@@ -134,11 +157,8 @@ with st.expander("🗑️ Futter löschen"):
 
 st.subheader("🛒 Dein Supermarkt-Register")
 
-# Zeige die Liste sofort an (kein Extraklick mehr nötig!)
 if st.session_state.watchlist:
     df = pd.DataFrame(st.session_state.watchlist)
-    
-    # Sicherstellen, dass die neuen Spalten existieren (für alte Einträge)
     if 'NFE i.Tr. (%)' not in df.columns:
         df['NFE i.Tr. (%)'] = "N/A"
         df['Status'] = "⚠️ Alt"
