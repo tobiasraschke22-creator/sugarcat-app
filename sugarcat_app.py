@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import requests
-import time
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -22,12 +21,7 @@ def load_watchlist():
         client = get_gsheet_client()
         sheet = client.open("SugarCat_Datenbank").sheet1
         records = sheet.get_all_records()
-        
-        if not records:
-            default_list = [{"Supermarkt": "DM", "brand": "Dein Bestes", "name": "Klassisch Rind", "store_type": "dm", "barcode": "4058172322587"}]
-            save_watchlist(default_list)
-            return default_list
-        return records
+        return records if records else []
     except Exception as e:
         st.error("Konnte Google Sheets nicht laden. Bitte Secrets prüfen!")
         return []
@@ -37,10 +31,9 @@ def save_watchlist(watchlist):
         client = get_gsheet_client()
         sheet = client.open("SugarCat_Datenbank").sheet1
         sheet.clear()
-        
-        df = pd.DataFrame(watchlist)
-        # Sende die aktualisierten Daten an Google Sheets
-        sheet.update(values=[df.columns.values.tolist()] + df.values.tolist(), range_name='A1')
+        if watchlist:
+            df = pd.DataFrame(watchlist)
+            sheet.update(values=[df.columns.values.tolist()] + df.values.tolist(), range_name='A1')
     except Exception as e:
         st.error(f"Fehler beim Speichern: {e}")
 
@@ -76,32 +69,6 @@ def fetch_from_api(barcode):
         return None
     except: return None
 
-def refresh_database(product_list):
-    updated_register = []
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
-    for idx, item in enumerate(product_list):
-        status_text.text(f"🔍 Suche Live-Daten für: {item['brand']}...")
-        data = fetch_from_api(item.get('barcode', ''))
-        
-        updated_item = item.copy()
-        if data:
-            nfe_dm, is_safe = calculate_nfe_dm(data['protein'], data['fat'], data['ash'], data['fiber'], data['moisture'])
-            updated_item.update({"NFE i.Tr. (%)": nfe_dm, "Status": "✅ Top" if is_safe else "❌ Achtung", "Quelle": data['source']})
-        else:
-            updated_item.update({"NFE i.Tr. (%)": "N/A", "Status": "⚠️ Keine Daten", "Quelle": "Nicht gefunden"})
-            
-        updated_register.append(updated_item)
-        progress_bar.progress((idx + 1) / len(product_list))
-        time.sleep(0.5)
-        
-    status_text.text("✅ Abgleich beendet!")
-    time.sleep(1)
-    status_text.empty()
-    progress_bar.empty()
-    return updated_register
-
 # ==========================================
 # 2. BENUTZEROBERFLÄCHE (UI)
 # ==========================================
@@ -109,12 +76,11 @@ st.set_page_config(page_title="SugarCat Calc", page_icon="🐾", layout="centere
 st.title("🐾 SugarCat Calc")
 st.markdown("Der smarte **NFE-Rechner** für Diabetiker-Katzen.")
 
+# Lade Daten beim Start
 if 'watchlist' not in st.session_state:
     st.session_state.watchlist = load_watchlist()
-if 'register_data' not in st.session_state:
-    st.session_state.register_data = []
 
-with st.expander("➕ Neues Futter hinzufügen"):
+with st.expander("➕ Neues Futter hinzufügen & scannen", expanded=True):
     with st.form("add_product_form", clear_on_submit=True):
         col1, col2 = st.columns(2)
         with col1:
@@ -124,13 +90,36 @@ with st.expander("➕ Neues Futter hinzufügen"):
             new_name = st.text_input("Sorte (z.B. Pâté Rind)")
             new_barcode = st.text_input("Barcode (Pflicht für API!)")
             
-        if st.form_submit_button("Speichern") and new_brand and new_name:
-            st.session_state.watchlist.append({
-                "Supermarkt": new_supermarket, "brand": new_brand, "name": new_name,
-                "store_type": new_supermarket.lower(), "barcode": new_barcode
-            })
-            save_watchlist(st.session_state.watchlist)
-            st.success("Gespeichert in Google Sheets!")
+        if st.form_submit_button("Speichern & Berechnen"):
+            if new_brand and new_name:
+                with st.spinner("Suche in der Live-Datenbank..."):
+                    # 1. API direkt abfragen
+                    api_data = fetch_from_api(new_barcode)
+                    
+                    # 2. Werte berechnen
+                    if api_data:
+                        nfe_dm, is_safe = calculate_nfe_dm(api_data['protein'], api_data['fat'], api_data['ash'], api_data['fiber'], api_data['moisture'])
+                        nfe_val = nfe_dm
+                        status_val = "✅ Top" if is_safe else "❌ Achtung"
+                        quelle_val = api_data['source']
+                    else:
+                        nfe_val = "N/A"
+                        status_val = "⚠️ Keine Daten"
+                        quelle_val = "Nicht gefunden"
+                    
+                    # 3. Direkt mit den fertigen Werten abspeichern
+                    new_entry = {
+                        "Supermarkt": new_supermarket, "brand": new_brand, "name": new_name,
+                        "store_type": new_supermarket.lower(), "barcode": new_barcode,
+                        "NFE i.Tr. (%)": nfe_val, "Status": status_val, "Quelle": quelle_val
+                    }
+                    
+                    st.session_state.watchlist.append(new_entry)
+                    save_watchlist(st.session_state.watchlist)
+                    st.success("Erfolgreich gespeichert!")
+                    st.rerun() # Lädt die Seite neu, damit die Tabelle sofort updatet
+            else:
+                st.warning("Bitte mindestens Marke und Sorte ausfüllen.")
 
 with st.expander("🗑️ Futter löschen"):
     if st.session_state.watchlist:
@@ -144,12 +133,17 @@ with st.expander("🗑️ Futter löschen"):
             st.rerun()
 
 st.subheader("🛒 Dein Supermarkt-Register")
-if st.button("🔄 Live-Daten abrufen", use_container_width=True):
-    with st.spinner('Verbinde mit Servern...'):
-        st.session_state.register_data = refresh_database(st.session_state.watchlist)
 
-if st.session_state.register_data:
-    df = pd.DataFrame(st.session_state.register_data)
+# Zeige die Liste sofort an (kein Extraklick mehr nötig!)
+if st.session_state.watchlist:
+    df = pd.DataFrame(st.session_state.watchlist)
+    
+    # Sicherstellen, dass die neuen Spalten existieren (für alte Einträge)
+    if 'NFE i.Tr. (%)' not in df.columns:
+        df['NFE i.Tr. (%)'] = "N/A"
+        df['Status'] = "⚠️ Alt"
+        df['Quelle'] = "-"
+
     df_display = df[['Supermarkt', 'brand', 'name', 'NFE i.Tr. (%)', 'Status', 'Quelle']]
     df_display.columns = ['Markt', 'Marke', 'Sorte', 'NFE (%)', 'Bewertung', 'Quelle']
     
@@ -161,4 +155,4 @@ if st.session_state.register_data:
         
     st.dataframe(df_display.style.map(color_status, subset=['Bewertung']), use_container_width=True, hide_index=True)
 else:
-    st.info("Klicke auf 'Live-Daten abrufen', um die Werte zu berechnen.")
+    st.info("Noch kein Futter gespeichert.")
