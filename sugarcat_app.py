@@ -2,8 +2,11 @@ import streamlit as st
 import pandas as pd
 import requests
 import time
+import json
 import gspread
 from google.oauth2.service_account import Credentials
+import google.generativeai as genai
+from PIL import Image
 
 # ==========================================
 # 0. SPEICHER-LOGIK (GOOGLE SHEETS)
@@ -74,40 +77,82 @@ def fetch_from_api(barcode):
 # 2. BENUTZEROBERFLÄCHE (UI)
 # ==========================================
 st.set_page_config(page_title="SugarCat Calc", page_icon="🐾", layout="centered")
-st.title("🐾 SugarCat Calc")
-st.markdown("Der smarte **NFE-Rechner** für Diabetiker-Katzen.")
+st.title("🐾 SugarCat Calc (AI Edition)")
+st.markdown("Der smarte **NFE-Rechner** mit KI-Erkennung für Diabetiker-Katzen.")
 
 if 'watchlist' not in st.session_state:
     st.session_state.watchlist = load_watchlist()
 
+# Initialisiere die manuellen Eingabewerte, damit die KI sie später überschreiben kann
+if 'man_protein' not in st.session_state: st.session_state['man_protein'] = 0.0
+if 'man_fat' not in st.session_state: st.session_state['man_fat'] = 0.0
+if 'man_ash' not in st.session_state: st.session_state['man_ash'] = 0.0
+if 'man_fiber' not in st.session_state: st.session_state['man_fiber'] = 0.0
+if 'man_moisture' not in st.session_state: st.session_state['man_moisture'] = 80.0
+
 # --- BEREICH: NEUES FUTTER ---
-with st.expander("➕ Neues Futter hinzufügen & scannen", expanded=False):
-    with st.form("add_product_form", clear_on_submit=True):
-        st.markdown("**1. Allgemeine Infos**")
-        col1, col2 = st.columns(2)
-        with col1:
-            new_supermarket = st.selectbox("Supermarkt", ["DM", "Rossmann", "Lidl", "Aldi", "Fressnapf", "Kaufland", "Edeka", "Sonstige"])
-            new_brand = st.text_input("Marke (z.B. Winston)*")
-        with col2:
-            new_name = st.text_input("Sorte (z.B. Pâté Rind)*")
-            new_barcode = st.text_input("Barcode (für Auto-Suche)")
-            
-        st.markdown("---")
-        st.markdown("**2. Manuelle Eingabe (Optional, falls Barcode unbekannt)**")
+with st.expander("➕ Neues Futter scannen & hinzufügen", expanded=True):
+    st.markdown("**1. Allgemeine Infos**")
+    new_supermarket = st.selectbox("Supermarkt", ["DM", "Rossmann", "Lidl", "Aldi", "Fressnapf", "Kaufland", "Edeka", "Sonstige"])
+    col1, col2 = st.columns(2)
+    with col1:
+        new_brand = st.text_input("Marke (z.B. Winston)*")
+    with col2:
+        new_name = st.text_input("Sorte (z.B. Pâté Rind)*")
+    new_barcode = st.text_input("Barcode (Optional für Live-API)")
         
+    st.markdown("---")
+    st.markdown("**2. 📸 Smarte KI-Erkennung (Etikett fotografieren)**")
+    
+    # Kamera-Input
+    picture = st.camera_input("Fotografiere die 'Analytischen Bestandteile' auf der Dose")
+    
+    if picture:
+        if st.button("✨ Bild mit KI auslesen"):
+            with st.spinner("KI liest das Etikett... Bitte warten."):
+                try:
+                    # KI konfigurieren
+                    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+                    model = genai.GenerativeModel('gemini-1.5-flash')
+                    img = Image.open(picture)
+                    
+                    # Anweisung an die KI
+                    prompt = 'Finde die "Analytischen Bestandteile" auf diesem Katzenfutter. Extrahiere die Prozentwerte für Rohprotein, Rohfett, Rohasche, Rohfaser und Feuchtigkeit. Antworte AUSSCHLIESSLICH im JSON Format ohne Markdown. Beispiel: {"protein": 10.5, "fat": 5.5, "ash": 2.0, "fiber": 0.5, "moisture": 80.0}. Wenn ein Wert fehlt, setze ihn auf 0.0 (außer Feuchtigkeit, dann setze 80.0).'
+                    
+                    response = model.generate_content([prompt, img])
+                    
+                    # Antwort bereinigen und lesen
+                    cleaned_text = response.text.replace('```json', '').replace('```', '').strip()
+                    data = json.loads(cleaned_text)
+                    
+                    # Regler automatisch verschieben
+                    st.session_state['man_protein'] = float(data.get('protein', 0.0))
+                    st.session_state['man_fat'] = float(data.get('fat', 0.0))
+                    st.session_state['man_ash'] = float(data.get('ash', 0.0))
+                    st.session_state['man_fiber'] = float(data.get('fiber', 0.0))
+                    st.session_state['man_moisture'] = float(data.get('moisture', 80.0))
+                    
+                    st.success("✅ Werte erfolgreich gelesen! Bitte überprüfe die Regler unten.")
+                except Exception as e:
+                    st.error(f"KI konnte das Bild nicht richtig lesen (Versuch es vielleicht mit besserem Licht). Fehler: {e}")
+
+    st.markdown("---")
+    st.markdown("**3. Werte (werden von KI ausgefüllt oder manuell)**")
+    
+    with st.form("add_product_form", clear_on_submit=True):
         col3, col4, col5 = st.columns(3)
         with col3:
-            man_protein = st.number_input("Rohprotein (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.1)
-            man_fat = st.number_input("Rohfett (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.1)
+            man_protein = st.number_input("Rohprotein (%)", min_value=0.0, max_value=100.0, step=0.1, key="man_protein")
+            man_fat = st.number_input("Rohfett (%)", min_value=0.0, max_value=100.0, step=0.1, key="man_fat")
         with col4:
-            man_ash = st.number_input("Rohasche (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.1)
-            man_fiber = st.number_input("Rohfaser (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.1)
+            man_ash = st.number_input("Rohasche (%)", min_value=0.0, max_value=100.0, step=0.1, key="man_ash")
+            man_fiber = st.number_input("Rohfaser (%)", min_value=0.0, max_value=100.0, step=0.1, key="man_fiber")
         with col5:
-            man_moisture = st.number_input("Feuchtigkeit (%)", min_value=0.0, max_value=100.0, value=80.0, step=0.1)
+            man_moisture = st.number_input("Feuchtigkeit (%)", min_value=0.0, max_value=100.0, step=0.1, key="man_moisture")
             
         if st.form_submit_button("Speichern & Berechnen"):
             if new_brand and new_name:
-                with st.spinner("Prüfe Daten..."):
+                with st.spinner("Wird gespeichert..."):
                     api_data = fetch_from_api(new_barcode)
                     
                     if api_data:
@@ -119,7 +164,7 @@ with st.expander("➕ Neues Futter hinzufügen & scannen", expanded=False):
                         nfe_dm, is_safe = calculate_nfe_dm(man_protein, man_fat, man_ash, man_fiber, man_moisture)
                         nfe_val = nfe_dm
                         status_val = "✅ Top" if is_safe else "❌ Achtung"
-                        quelle_val = "✍️ Manuell"
+                        quelle_val = "📸 KI / Manuell"
                     else:
                         nfe_val = "N/A"
                         status_val = "⚠️ Keine Daten"
@@ -133,43 +178,41 @@ with st.expander("➕ Neues Futter hinzufügen & scannen", expanded=False):
                     
                     st.session_state.watchlist.append(new_entry)
                     save_watchlist(st.session_state.watchlist)
+                    
+                    # Werte nach Speichern wieder auf null setzen
+                    st.session_state['man_protein'] = 0.0
+                    st.session_state['man_fat'] = 0.0
+                    st.session_state['man_ash'] = 0.0
+                    st.session_state['man_fiber'] = 0.0
+                    st.session_state['man_moisture'] = 80.0
+                    
                     st.success("Erfolgreich gespeichert!")
                     time.sleep(1)
                     st.rerun()
             else:
-                st.warning("Bitte mindestens Marke und Sorte ausfüllen.")
+                st.warning("Bitte mindestens Marke und Sorte (oben mit *) ausfüllen.")
 
-# --- NEU: SMARTE EINKAUFSLISTE ---
-with st.expander("📝 Smarte Einkaufsliste", expanded=True):
+# --- BEREICH: SMARTE EINKAUFSLISTE ---
+with st.expander("📝 Smarte Einkaufsliste", expanded=False):
     if st.session_state.watchlist:
         df_shopping = pd.DataFrame(st.session_state.watchlist)
-        
-        # Filtere nur Sorten heraus, die den Status "✅ Top" haben
         if 'Status' in df_shopping.columns:
             safe_foods = df_shopping[df_shopping['Status'].str.contains("✅ Top", na=False, case=False)]
-            
             if not safe_foods.empty:
-                # Erstelle eine Liste aller Supermärkte, für die wir sicheres Futter haben
                 available_markets = ["Alle Supermärkte"] + sorted(safe_foods['Supermarkt'].unique().tolist())
                 selected_market = st.selectbox("In welchem Laden stehst du gerade?", available_markets)
-                
                 if selected_market != "Alle Supermärkte":
-                    # Zeige nur Futter für den ausgewählten Markt
                     safe_foods = safe_foods[safe_foods['Supermarkt'] == selected_market]
-                
                 if not safe_foods.empty:
-                    st.success(f"**Deine sichere Einkaufsliste für {selected_market}:**")
-                    # Gebe die Liste schön formatiert aus
+                    st.success(f"**Sichere Sorten für {selected_market}:**")
                     for index, row in safe_foods.iterrows():
                         st.markdown(f"- 🛒 **{row['brand']}**: {row['name']} *(NFE: {row['NFE i.Tr. (%)']}%)*")
                 else:
-                    st.info(f"Für {selected_market} hast du leider noch keine sicheren Sorten gefunden.")
+                    st.info(f"Für {selected_market} noch keine sicheren Sorten gefunden.")
             else:
-                st.info("Du hast noch keine Futtersorten mit einem sicheren NFE-Wert (Unter 10%) gespeichert.")
-        else:
-            st.info("Bitte speichere zuerst Futter ab, um eine Einkaufsliste zu generieren.")
+                st.info("Noch keine sicheren Sorten (Unter 10%) gespeichert.")
     else:
-        st.write("Deine Datenbank ist noch leer. Füge zuerst Futter hinzu!")
+        st.write("Datenbank ist leer.")
 
 # --- BEREICH: LÖSCHEN ---
 with st.expander("🗑️ Futter löschen"):
