@@ -80,11 +80,17 @@ def fetch_from_api(barcode):
     except: return None
 
 # ==========================================
-# 2. KI: BILDANALYSE
+# 2. KI: BILDANALYSE (Der "Dietrich")
 # ==========================================
 def analyze_image(img):
-    # Die App probiert automatisch das beste verfügbare Modell
-    models_to_try = ['gemini-1.5-flash', 'gemini-pro-vision']
+    # Wir probieren einfach ALLE aktuellen Google-Modelle durch, bis eins funktioniert!
+    models_to_try = [
+        'gemini-1.5-flash', 
+        'gemini-1.5-flash-latest', 
+        'gemini-1.5-pro', 
+        'gemini-1.5-pro-latest',
+        'gemini-1.0-pro-vision-latest'
+    ]
     last_error = None
     
     prompt = """
@@ -105,9 +111,9 @@ def analyze_image(img):
             return json.loads(result_text)
         except Exception as e:
             last_error = e
-            continue # Falls 404 Fehler, probiere das nächste Modell!
+            continue # Tür verschlossen? Nächstes Modell probieren!
             
-    raise Exception(f"Beide Modelle sind fehlgeschlagen. Letzter Fehler: {last_error}")
+    raise Exception(f"Alle KI-Türen sind zu. Letzter Fehler: {last_error}")
 
 # ==========================================
 # 3. BENUTZEROBERFLÄCHE (UI)
